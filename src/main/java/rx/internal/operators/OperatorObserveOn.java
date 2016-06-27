@@ -16,15 +16,18 @@
 package rx.internal.operators;
 
 import java.util.Queue;
-import java.util.concurrent.atomic.*;
+import java.util.concurrent.atomic.AtomicLong;
 
-import rx.Observable.Operator;
 import rx.*;
+import rx.Observable.Operator;
 import rx.exceptions.MissingBackpressureException;
 import rx.functions.Action0;
-import rx.internal.util.*;
+import rx.internal.schedulers.*;
+import rx.internal.util.RxRingBuffer;
+import rx.internal.util.atomic.SpscAtomicArrayQueue;
 import rx.internal.util.unsafe.*;
-import rx.schedulers.*;
+import rx.plugins.RxJavaHooks;
+import rx.schedulers.Schedulers;
 
 /**
  * Delivers events on the specified {@code Scheduler} asynchronously via an unbounded buffer.
@@ -37,12 +40,26 @@ import rx.schedulers.*;
 public final class OperatorObserveOn<T> implements Operator<T, T> {
 
     private final Scheduler scheduler;
+    private final boolean delayError;
+    private final int bufferSize;
 
     /**
-     * @param scheduler
+     * @param scheduler the scheduler to use
+     * @param delayError delay errors until all normal events are emitted in the other thread?
      */
-    public OperatorObserveOn(Scheduler scheduler) {
+    public OperatorObserveOn(Scheduler scheduler, boolean delayError) {
+        this(scheduler, delayError, RxRingBuffer.SIZE);
+    }
+
+    /**
+     * @param scheduler the scheduler to use
+     * @param delayError delay errors until all normal events are emitted in the other thread?
+     * @param bufferSize for the buffer feeding the Scheduler workers, defaults to {@code RxRingBuffer.MAX} if <= 0
+     */
+    public OperatorObserveOn(Scheduler scheduler, boolean delayError, int bufferSize) {
         this.scheduler = scheduler;
+        this.delayError = delayError;
+        this.bufferSize = (bufferSize > 0) ? bufferSize : RxRingBuffer.SIZE;
     }
 
     @Override
@@ -54,66 +71,91 @@ public final class OperatorObserveOn<T> implements Operator<T, T> {
             // avoid overhead, execute directly
             return child;
         } else {
-            return new ObserveOnSubscriber<T>(scheduler, child);
+            ObserveOnSubscriber<T> parent = new ObserveOnSubscriber<T>(scheduler, child, delayError, bufferSize);
+            parent.init();
+            return parent;
         }
+    }
+    
+    public static <T> Operator<T, T> rebatch(final int n) {
+        return new Operator<T, T>() {
+            @Override
+            public Subscriber<? super T> call(Subscriber<? super T> child) {
+                ObserveOnSubscriber<T> parent = new ObserveOnSubscriber<T>(Schedulers.immediate(), child, false, n);
+                parent.init();
+                return parent;
+            }
+        };
     }
 
     /** Observe through individual queue per observer. */
-    private static final class ObserveOnSubscriber<T> extends Subscriber<T> {
+    static final class ObserveOnSubscriber<T> extends Subscriber<T> implements Action0 {
         final Subscriber<? super T> child;
         final Scheduler.Worker recursiveScheduler;
-        final ScheduledUnsubscribe scheduledUnsubscribe;
-        final NotificationLite<T> on = NotificationLite.instance();
-
+        final NotificationLite<T> on;
+        final boolean delayError;
         final Queue<Object> queue;
-        volatile boolean completed = false;
-        volatile boolean failure = false;
+        /** The emission threshold that should trigger a replenishing request. */
+        final int limit;
+        
+        // the status of the current stream
+        volatile boolean finished;
 
-        volatile long requested = 0;
-        @SuppressWarnings("rawtypes")
-        static final AtomicLongFieldUpdater<ObserveOnSubscriber> REQUESTED = AtomicLongFieldUpdater.newUpdater(ObserveOnSubscriber.class, "requested");
-
-        @SuppressWarnings("unused")
-        volatile long counter;
-        @SuppressWarnings("rawtypes")
-        static final AtomicLongFieldUpdater<ObserveOnSubscriber> COUNTER_UPDATER = AtomicLongFieldUpdater.newUpdater(ObserveOnSubscriber.class, "counter");
-
-        volatile Throwable error;
+        final AtomicLong requested = new AtomicLong();
+        
+        final AtomicLong counter = new AtomicLong();
+        
+        /** 
+         * The single exception if not null, should be written before setting finished (release) and read after
+         * reading finished (acquire).
+         */
+        Throwable error;
+        
+        /** Remembers how many elements have been emitted before the requests run out. */
+        long emitted;
 
         // do NOT pass the Subscriber through to couple the subscription chain ... unsubscribing on the parent should
         // not prevent anything downstream from consuming, which will happen if the Subscription is chained
-        public ObserveOnSubscriber(Scheduler scheduler, Subscriber<? super T> child) {
+        public ObserveOnSubscriber(Scheduler scheduler, Subscriber<? super T> child, boolean delayError, int bufferSize) {
             this.child = child;
             this.recursiveScheduler = scheduler.createWorker();
+            this.delayError = delayError;
+            this.on = NotificationLite.instance();
+            int calculatedSize = (bufferSize > 0) ? bufferSize : RxRingBuffer.SIZE;
+            // this formula calculates the 75% of the bufferSize, rounded up to the next integer
+            this.limit = calculatedSize - (calculatedSize >> 2);
             if (UnsafeAccess.isUnsafeAvailable()) {
-                queue = new SpscArrayQueue<Object>(RxRingBuffer.SIZE);
+                queue = new SpscArrayQueue<Object>(calculatedSize);
             } else {
-                queue = new SynchronizedQueue<Object>(RxRingBuffer.SIZE);
+                queue = new SpscAtomicArrayQueue<Object>(calculatedSize);
             }
-            this.scheduledUnsubscribe = new ScheduledUnsubscribe(recursiveScheduler);
-            child.add(scheduledUnsubscribe);
-            child.setProducer(new Producer() {
+            // signal that this is an async operator capable of receiving this many
+            request(calculatedSize);
+        }
+        
+        void init() {
+            // don't want this code in the constructor because `this` can escape through the 
+            // setProducer call
+            Subscriber<? super T> localChild = child;
+            
+            localChild.setProducer(new Producer() {
 
                 @Override
                 public void request(long n) {
-                    REQUESTED.getAndAdd(ObserveOnSubscriber.this, n);
-                    schedule();
+                    if (n > 0L) {
+                        BackpressureUtils.getAndAddRequest(requested, n);
+                        schedule();
+                    }
                 }
 
             });
-            child.add(recursiveScheduler);
-            child.add(this);
-        }
-
-        @Override
-        public void onStart() {
-            // signal that this is an async operator capable of receiving this many
-            request(RxRingBuffer.SIZE);
+            localChild.add(recursiveScheduler);
+            localChild.add(this);
         }
 
         @Override
         public void onNext(final T t) {
-            if (isUnsubscribed() || completed) {
+            if (isUnsubscribed() || finished) {
                 return;
             }
             if (!queue.offer(on.next(t))) {
@@ -125,131 +167,131 @@ public final class OperatorObserveOn<T> implements Operator<T, T> {
 
         @Override
         public void onCompleted() {
-            if (isUnsubscribed() || completed) {
+            if (isUnsubscribed() || finished) {
                 return;
             }
-            if (error != null) {
-                return;
-            }
-            completed = true;
+            finished = true;
             schedule();
         }
 
         @Override
         public void onError(final Throwable e) {
-            if (isUnsubscribed() || completed) {
-                return;
-            }
-            if (error != null) {
+            if (isUnsubscribed() || finished) {
+                RxJavaHooks.onError(e);
                 return;
             }
             error = e;
-            // unsubscribe eagerly since time will pass before the scheduled onError results in an unsubscribe event
-            unsubscribe();
-            // mark failure so the polling thread will skip onNext still in the queue
-            completed = true;
-            failure = true;
+            finished = true;
             schedule();
         }
 
-        final Action0 action = new Action0() {
-
-            @Override
-            public void call() {
-                pollQueue();
-            }
-
-        };
-
         protected void schedule() {
-            if (COUNTER_UPDATER.getAndIncrement(this) == 0) {
-                recursiveScheduler.schedule(action);
+            if (counter.getAndIncrement() == 0) {
+                recursiveScheduler.schedule(this);
             }
         }
 
         // only execute this from schedule()
-        void pollQueue() {
-            int emitted = 0;
-            do {
-                /*
-                 * Set to 1 otherwise it could have grown very large while in the last poll loop
-                 * and then we can end up looping all those times again here before exiting even once we've drained
-                 */
-                counter = 1;
+        @Override
+        public void call() {
+            long missed = 1L;
+            long currentEmission = emitted;
 
-//                middle:
-                while (!scheduledUnsubscribe.isUnsubscribed()) {
-                    if (failure) {
-                        child.onError(error);
+            // these are accessed in a tight loop around atomics so
+            // loading them into local variables avoids the mandatory re-reading
+            // of the constant fields
+            final Queue<Object> q = this.queue;
+            final Subscriber<? super T> localChild = this.child;
+            final NotificationLite<T> localOn = this.on;
+            
+            // requested and counter are not included to avoid JIT issues with register spilling
+            // and their access is is amortized because they are part of the outer loop which runs
+            // less frequently (usually after each bufferSize elements)
+            
+            for (;;) {
+                long requestAmount = requested.get();
+                
+                while (requestAmount != currentEmission) {
+                    boolean done = finished;
+                    Object v = q.poll();
+                    boolean empty = v == null;
+                    
+                    if (checkTerminated(done, empty, localChild, q)) {
                         return;
-                    } else {
-                        if (requested == 0 && completed && queue.isEmpty()) {
-                            child.onCompleted();
-                            return;
-                        }
-                        if (REQUESTED.getAndDecrement(this) != 0) {
-                            Object o = queue.poll();
-                            if (o == null) {
-                                if (completed) {
-                                    if (failure) {
-                                        child.onError(error);
-                                    } else {
-                                        child.onCompleted();
-                                    }
-                                    return;
-                                }
-                                // nothing in queue
-                                REQUESTED.incrementAndGet(this);
-                                break;
-                            } else {
-                                if (!on.accept(child, o)) {
-                                    // non-terminal event so let's increment count
-                                    emitted++;
-                                }
-                            }
-                        } else {
-                            // we hit the end ... so increment back to 0 again
-                            REQUESTED.incrementAndGet(this);
-                            break;
-                        }
+                    }
+                    
+                    if (empty) {
+                        break;
+                    }
+                    
+                    localChild.onNext(localOn.getValue(v));
+
+                    currentEmission++;
+                    if (currentEmission == limit) {
+                        requestAmount = BackpressureUtils.produced(requested, currentEmission);
+                        request(currentEmission);
+                        currentEmission = 0L;
                     }
                 }
-            } while (COUNTER_UPDATER.decrementAndGet(this) > 0);
-
-            // request the number of items that we emitted in this poll loop
-            if (emitted > 0) {
-                request(emitted);
-            }
-        }
-    }
-
-    static final class ScheduledUnsubscribe implements Subscription {
-        final Scheduler.Worker worker;
-        volatile int once;
-        static final AtomicIntegerFieldUpdater<ScheduledUnsubscribe> ONCE_UPDATER = AtomicIntegerFieldUpdater.newUpdater(ScheduledUnsubscribe.class, "once");
-        volatile boolean unsubscribed = false;
-
-        public ScheduledUnsubscribe(Scheduler.Worker worker) {
-            this.worker = worker;
-        }
-
-        @Override
-        public boolean isUnsubscribed() {
-            return unsubscribed;
-        }
-
-        @Override
-        public void unsubscribe() {
-            if (ONCE_UPDATER.getAndSet(this, 1) == 0) {
-                worker.schedule(new Action0() {
-                    @Override
-                    public void call() {
-                        worker.unsubscribe();
-                        unsubscribed = true;
+                
+                if (requestAmount == currentEmission) {
+                    if (checkTerminated(finished, q.isEmpty(), localChild, q)) {
+                        return;
                     }
-                });
+                }
+
+                emitted = currentEmission;
+                missed = counter.addAndGet(-missed);
+                if (missed == 0L) {
+                    break;
+                }
             }
         }
-
+        
+        boolean checkTerminated(boolean done, boolean isEmpty, Subscriber<? super T> a, Queue<Object> q) {
+            if (a.isUnsubscribed()) {
+                q.clear();
+                return true;
+            }
+            
+            if (done) {
+                if (delayError) {
+                    if (isEmpty) {
+                        Throwable e = error;
+                        try {
+                            if (e != null) {
+                                a.onError(e);
+                            } else {
+                                a.onCompleted();
+                            }
+                        } finally {
+                            recursiveScheduler.unsubscribe();
+                        }
+                    }
+                } else {
+                    Throwable e = error;
+                    if (e != null) {
+                        q.clear();
+                        try {
+                            a.onError(e);
+                        } finally {
+                            recursiveScheduler.unsubscribe();
+                        }
+                        return true;
+                    } else
+                    if (isEmpty) {
+                        try {
+                            a.onCompleted();
+                        } finally {
+                            recursiveScheduler.unsubscribe();
+                        }
+                        return true;
+                    }
+                }
+                    
+            }
+            
+            return false;
+        }
     }
 }

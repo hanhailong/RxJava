@@ -15,11 +15,13 @@
  */
 package rx.internal.operators;
 
+import com.pushtorefresh.private_constructor_checker.PrivateConstructorChecker;
+
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.concurrent.TimeUnit;
 
-import junit.framework.Assert;
+import org.junit.Assert;
 
 import org.junit.Test;
 
@@ -29,6 +31,11 @@ import rx.schedulers.TestScheduler;
 import rx.subjects.PublishSubject;
 
 public class BlockingOperatorLatestTest {
+    @Test
+    public void constructorShouldBePrivate() {
+        PrivateConstructorChecker.forClass(BlockingOperatorLatest.class).expectedTypeOfException(IllegalStateException.class).expectedExceptionMessage("No instances!").check();
+    }
+
     @Test(timeout = 1000)
     public void testSimple() {
         TestScheduler scheduler = new TestScheduler();

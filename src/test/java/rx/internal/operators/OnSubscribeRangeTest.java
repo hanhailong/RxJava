@@ -17,6 +17,7 @@ package rx.internal.operators;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -26,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.Test;
@@ -77,7 +79,7 @@ public class OnSubscribeRangeTest {
     }
 
     @Test
-    public void testRangeWithOverflow() {
+    public void testRangeWithZero() {
         Observable.range(1, 0);
     }
 
@@ -104,7 +106,7 @@ public class OnSubscribeRangeTest {
     @Test
     public void testBackpressureViaRequest() {
         OnSubscribeRange o = new OnSubscribeRange(1, RxRingBuffer.SIZE);
-        TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
+        TestSubscriber<Integer> ts = TestSubscriber.create();
         ts.assertReceivedOnNext(Collections.<Integer> emptyList());
         ts.requestMore(1);
         o.call(ts);
@@ -125,7 +127,7 @@ public class OnSubscribeRangeTest {
         }
 
         OnSubscribeRange o = new OnSubscribeRange(1, list.size());
-        TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
+        TestSubscriber<Integer> ts = TestSubscriber.create();
         ts.assertReceivedOnNext(Collections.<Integer> emptyList());
         ts.requestMore(Long.MAX_VALUE); // infinite
         o.call(ts);
@@ -135,7 +137,7 @@ public class OnSubscribeRangeTest {
     void testWithBackpressureOneByOne(int start) {
         Observable<Integer> source = Observable.range(start, 100);
         
-        TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
+        TestSubscriber<Integer> ts = TestSubscriber.create();
         ts.requestMore(1);
         source.subscribe(ts);
         
@@ -150,7 +152,7 @@ public class OnSubscribeRangeTest {
     void testWithBackpressureAllAtOnce(int start) {
         Observable<Integer> source = Observable.range(start, 100);
         
-        TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
+        TestSubscriber<Integer> ts = TestSubscriber.create();
         ts.requestMore(100);
         source.subscribe(ts);
         
@@ -177,7 +179,7 @@ public class OnSubscribeRangeTest {
     public void testWithBackpressureRequestWayMore() {
         Observable<Integer> source = Observable.range(50, 100);
         
-        TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
+        TestSubscriber<Integer> ts = TestSubscriber.create();
         ts.requestMore(150);
         source.subscribe(ts);
         
@@ -219,5 +221,51 @@ public class OnSubscribeRangeTest {
                 request(Long.MAX_VALUE - 1);
             }});
         assertEquals(n, count.get());
+    }
+    
+    @Test
+    public void testEmptyRangeSendsOnCompleteEagerlyWithRequestZero() {
+        final AtomicBoolean completed = new AtomicBoolean(false);
+        Observable.range(1, 0).subscribe(new Subscriber<Integer>() {
+
+            @Override
+            public void onStart() {
+                request(0);
+            }
+            
+            @Override
+            public void onCompleted() {
+                completed.set(true);
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                
+            }
+
+            @Override
+            public void onNext(Integer t) {
+                
+            }});
+        assertTrue(completed.get());
+    }
+    
+    @Test(timeout = 1000)
+    public void testNearMaxValueWithoutBackpressure() {
+        TestSubscriber<Integer> ts = TestSubscriber.create();
+        Observable.range(Integer.MAX_VALUE - 1, 2).subscribe(ts);
+        
+        ts.assertCompleted();
+        ts.assertNoErrors();
+        ts.assertValues(Integer.MAX_VALUE - 1, Integer.MAX_VALUE);
+    }
+    @Test(timeout = 1000)
+    public void testNearMaxValueWithBackpressure() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(3);
+        Observable.range(Integer.MAX_VALUE - 1, 2).subscribe(ts);
+        
+        ts.assertCompleted();
+        ts.assertNoErrors();
+        ts.assertValues(Integer.MAX_VALUE - 1, Integer.MAX_VALUE);
     }
 }

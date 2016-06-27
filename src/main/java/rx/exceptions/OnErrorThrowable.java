@@ -15,6 +15,9 @@
  */
 package rx.exceptions;
 
+import java.util.HashSet;
+import java.util.Set;
+
 import rx.plugins.RxJavaErrorHandler;
 import rx.plugins.RxJavaPlugins;
 
@@ -66,16 +69,18 @@ public final class OnErrorThrowable extends RuntimeException {
      * Converts a {@link Throwable} into an {@link OnErrorThrowable}.
      *
      * @param t
-     *          the {@code Throwable} to convert
+     *          the {@code Throwable} to convert; if null, a NullPointerException is constructed
      * @return an {@code OnErrorThrowable} representation of {@code t}
      */
     public static OnErrorThrowable from(Throwable t) {
+        if (t == null) {
+            t = new NullPointerException();
+        }
         Throwable cause = Exceptions.getFinalCause(t);
         if (cause instanceof OnErrorThrowable.OnNextValue) {
             return new OnErrorThrowable(t, ((OnNextValue) cause).getValue());
-        } else {
-            return new OnErrorThrowable(t);
         }
+        return new OnErrorThrowable(t);
     }
 
     /**
@@ -90,8 +95,11 @@ public final class OnErrorThrowable extends RuntimeException {
      *         cause
      */
     public static Throwable addValueAsLastCause(Throwable e, Object value) {
+        if (e == null) {
+            e = new NullPointerException();
+        }
         Throwable lastCause = Exceptions.getFinalCause(e);
-        if (lastCause != null && lastCause instanceof OnNextValue) {
+        if (lastCause instanceof OnNextValue) {
             // purposefully using == for object reference check
             if (((OnNextValue) lastCause).getValue() == value) {
                 // don't add another
@@ -111,6 +119,27 @@ public final class OnErrorThrowable extends RuntimeException {
         private static final long serialVersionUID = -3454462756050397899L;
 
         private final Object value;
+        
+        // Lazy loaded singleton 
+        static final class Primitives {
+            
+            static final Set<Class<?>> INSTANCE = create();
+
+            private static Set<Class<?>> create() {
+                Set<Class<?>> set = new HashSet<Class<?>>();
+                set.add(Boolean.class);
+                set.add(Character.class);
+                set.add(Byte.class);
+                set.add(Short.class);
+                set.add(Integer.class);
+                set.add(Long.class);
+                set.add(Float.class);
+                set.add(Double.class);
+                // Void is another primitive but cannot be instantiated 
+                // and is caught by the null check in renderValue
+                return set;
+            }
+        }
 
         /**
          * Create an {@code OnNextValue} exception and include in its error message a string representation of
@@ -148,11 +177,11 @@ public final class OnErrorThrowable extends RuntimeException {
          * @return a string version of the object if primitive or managed through error plugin,
          *        otherwise the classname of the object
          */
-        private static String renderValue(Object value){
+        static String renderValue(Object value){
             if (value == null) {
                 return "null";
             }
-            if (value.getClass().isPrimitive()) {
+            if (Primitives.INSTANCE.contains(value.getClass())) {
                 return value.toString();
             }
             if (value instanceof String) {
@@ -162,6 +191,7 @@ public final class OnErrorThrowable extends RuntimeException {
                 return ((Enum<?>) value).name();
             }
 
+            @SuppressWarnings("deprecation")
             String pluggedRendering = RxJavaPlugins.getInstance().getErrorHandler().handleOnNextValueRendering(value);
             if (pluggedRendering != null) {
                 return pluggedRendering;

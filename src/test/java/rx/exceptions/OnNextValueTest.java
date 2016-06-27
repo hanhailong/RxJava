@@ -16,13 +16,16 @@
 package rx.exceptions;
 
 import org.junit.Test;
+
 import rx.Observable;
 import rx.Observer;
+import rx.exceptions.OnErrorThrowable.OnNextValue;
 import rx.functions.Func1;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -33,7 +36,7 @@ import static org.junit.Assert.fail;
  *    this.value = value;
  * }
  * ```
- * I know this is probably a helpful error message in some cases but this can be a really costly operation when an objects toString is an expensive call or contains alot of output. I don't think we should be printing this in any case but if so it should be on demand (overload of getMessage()) rather than eagerly.
+ * I know this is probably a helpful error message in some cases but this can be a really costly operation when an objects toString is an expensive call or contains a lot of output. I don't think we should be printing this in any case but if so it should be on demand (overload of getMessage()) rather than eagerly.
  * <p/>
  * In my case it is causing a toString of a large context object that is normally only used for debugging purposes which makes the exception logs hard to use and they are rolling over the log files very quickly.
  * <p/>
@@ -117,5 +120,50 @@ public final class OnNextValueTest {
                     }
                 }).subscribe(observer);
 
+    }
+    
+    @Test
+    public void testRenderInteger() {
+        assertEquals("123", OnNextValue.renderValue(123));
+    }
+    
+    @Test
+    public void testRenderByte() {
+        assertEquals("10", OnNextValue.renderValue((byte) 10));
+    }
+    
+    @Test
+    public void testRenderBoolean() {
+        assertEquals("true", OnNextValue.renderValue(true));
+    }
+    
+    @Test
+    public void testRenderShort() {
+        assertEquals("10", OnNextValue.renderValue((short) 10));
+    }
+    
+    @Test
+    public void testRenderLong() {
+        assertEquals("10", OnNextValue.renderValue(10L));
+    }
+    
+    @Test
+    public void testRenderCharacter() {
+        assertEquals("10", OnNextValue.renderValue(10L));
+    }
+    
+    @Test
+    public void testRenderFloat() {
+        assertEquals("10.0", OnNextValue.renderValue(10.0f));
+    }
+    
+    @Test
+    public void testRenderDouble() {
+        assertEquals("10.0", OnNextValue.renderValue(10.0));
+    }
+    
+    @Test
+    public void testRenderVoid() {
+        assertEquals("null", OnNextValue.renderValue((Void) null));
     }
 }

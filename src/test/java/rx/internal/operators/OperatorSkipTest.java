@@ -15,33 +15,35 @@
  */
 package rx.internal.operators;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+
 import org.junit.Test;
 
 import rx.Observable;
 import rx.Observer;
-import rx.internal.operators.OperatorSkip;
+import rx.functions.Action1;
+import rx.observers.TestSubscriber;
 
 public class OperatorSkipTest {
 
     @Test
     public void testSkipNegativeElements() {
-
-        Observable<String> skip = Observable.just("one", "two", "three").lift(new OperatorSkip<String>(-99));
-
-        @SuppressWarnings("unchecked")
-        Observer<String> observer = mock(Observer.class);
-        skip.subscribe(observer);
-        verify(observer, times(1)).onNext("one");
-        verify(observer, times(1)).onNext("two");
-        verify(observer, times(1)).onNext("three");
-        verify(observer, never()).onError(any(Throwable.class));
-        verify(observer, times(1)).onCompleted();
+        try {
+            Observable.just("one", "two", "three").skip(-99);
+            fail("Expected IllegalArgumentException");
+        } catch (IllegalArgumentException e) {
+            assertEquals("n >= 0 required but it was -99", e.getMessage());
+        }
     }
 
     @Test
@@ -144,4 +146,36 @@ public class OperatorSkipTest {
         verify(observer, never()).onCompleted();
 
     }
+    
+    @Test
+    public void testBackpressureMultipleSmallAsyncRequests() throws InterruptedException {
+        final AtomicLong requests = new AtomicLong(0);
+        TestSubscriber<Long> ts = new TestSubscriber<Long>(0);
+        Observable.interval(100, TimeUnit.MILLISECONDS)
+                .doOnRequest(new Action1<Long>() {
+                    @Override
+                    public void call(Long n) {
+                        requests.addAndGet(n);
+                    }
+                }).skip(4).subscribe(ts);
+        Thread.sleep(100);
+        ts.requestMore(1);
+        ts.requestMore(1);
+        Thread.sleep(100);
+        ts.unsubscribe();
+        ts.assertUnsubscribed();
+        ts.assertNoErrors();
+        assertEquals(6, requests.get());
+    }
+    
+    @Test
+    public void testRequestOverflowDoesNotOccur() {
+        TestSubscriber<Integer> ts = new TestSubscriber<Integer>(Long.MAX_VALUE-1);
+        Observable.range(1, 10).skip(5).subscribe(ts);
+        ts.assertTerminalEvent();
+        ts.assertCompleted();
+        ts.assertNoErrors();
+        assertEquals(Arrays.asList(6,7,8,9,10), ts.getOnNextEvents());
+    }
+    
 }

@@ -16,6 +16,8 @@
 
 package rx.internal.operators;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.*;
 
@@ -28,7 +30,7 @@ import rx.exceptions.TestException;
 import rx.functions.Func1;
 import rx.internal.util.UtilityFunctions;
 import rx.observers.TestSubscriber;
-;
+
 
 public class OperatorTakeUntilPredicateTest {
     @Test
@@ -130,6 +132,22 @@ public class OperatorTakeUntilPredicateTest {
         
         ts.assertNoErrors();
         ts.assertReceivedOnNext(Arrays.asList(1, 2, 3, 4, 5));
-        Assert.assertEquals(0, ts.getOnCompletedEvents().size());
+        Assert.assertEquals(0, ts.getCompletions());
+    }
+    
+    @Test
+    public void testErrorIncludesLastValueAsCause() {
+        TestSubscriber<String> ts = new TestSubscriber<String>();
+        final TestException e = new TestException("Forced failure");
+        Observable.just("abc").takeUntil(new Func1<String, Boolean>() {
+            @Override
+            public Boolean call(String t) {
+                throw e;
+            }
+        }).subscribe(ts);
+        ts.assertTerminalEvent();
+        ts.assertNotCompleted();
+        assertEquals(1, ts.getOnErrorEvents().size());
+        assertTrue(ts.getOnErrorEvents().get(0).getCause().getMessage().contains("abc"));
     }
 }

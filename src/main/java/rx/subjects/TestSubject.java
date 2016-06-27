@@ -15,8 +15,6 @@
  */
 package rx.subjects;
 
-import java.util.concurrent.TimeUnit;
-
 import rx.Observer;
 import rx.Scheduler;
 import rx.functions.Action0;
@@ -24,6 +22,8 @@ import rx.functions.Action1;
 import rx.internal.operators.NotificationLite;
 import rx.schedulers.TestScheduler;
 import rx.subjects.SubjectSubscriptionManager.SubjectObserver;
+
+import java.util.concurrent.TimeUnit;
 
 /**
  * A variety of Subject that is useful for testing purposes. It operates on a {@link TestScheduler} and allows
@@ -34,6 +34,9 @@ import rx.subjects.SubjectSubscriptionManager.SubjectObserver;
  *          the type of item observed by and emitted by the subject
  */
 public final class TestSubject<T> extends Subject<T, T> {
+    private final SubjectSubscriptionManager<T> state;
+    private final Scheduler.Worker innerScheduler;
+
 
     /**
      * Creates and returns a new {@code TestSubject}.
@@ -49,7 +52,7 @@ public final class TestSubject<T> extends Subject<T, T> {
 
             @Override
             public void call(SubjectObserver<T> o) {
-                o.emitFirst(state.get(), state.nl);
+                o.emitFirst(state.getLatest(), state.nl);
             }
             
         };
@@ -58,9 +61,6 @@ public final class TestSubject<T> extends Subject<T, T> {
         return new TestSubject<T>(state, state, scheduler);
     }
 
-    private final SubjectSubscriptionManager<T> state;
-    private final Scheduler.Worker innerScheduler;
-
     protected TestSubject(OnSubscribe<T> onSubscribe, SubjectSubscriptionManager<T> state, TestScheduler scheduler) {
         super(onSubscribe);
         this.state = state;
@@ -68,14 +68,14 @@ public final class TestSubject<T> extends Subject<T, T> {
     }
 
     /**
-     * Schedule a call to {@code onCompleted} at relative time of "now()" on TestScheduler.
+     * Schedule a call to {@code onCompleted} on TestScheduler.
      */
     @Override
     public void onCompleted() {
-        onCompleted(innerScheduler.now());
+        onCompleted(0);
     }
 
-    private void _onCompleted() {
+    void internalOnCompleted() {
         if (state.active) {
             for (SubjectObserver<T> bo : state.terminate(NotificationLite.instance().completed())) {
                 bo.onCompleted();
@@ -86,29 +86,29 @@ public final class TestSubject<T> extends Subject<T, T> {
     /**
      * Schedule a call to {@code onCompleted} relative to "now()" +n milliseconds in the future.
      *
-     * @param timeInMilliseconds
+     * @param delayTime
      *         the number of milliseconds in the future relative to "now()" at which to call {@code onCompleted}
      */
-    public void onCompleted(long timeInMilliseconds) {
+    public void onCompleted(long delayTime) {
         innerScheduler.schedule(new Action0() {
 
             @Override
             public void call() {
-                _onCompleted();
+                internalOnCompleted();
             }
 
-        }, timeInMilliseconds, TimeUnit.MILLISECONDS);
+        }, delayTime, TimeUnit.MILLISECONDS);
     }
 
     /**
-     * Schedule a call to {@code onError} at relative time of "now()" on TestScheduler.
+     * Schedule a call to {@code onError} on TestScheduler.
      */
     @Override
     public void onError(final Throwable e) {
-        onError(e, innerScheduler.now());
+        onError(e, 0);
     }
 
-    private void _onError(final Throwable e) {
+    void internalOnError(final Throwable e) {
         if (state.active) {
             for (SubjectObserver<T> bo : state.terminate(NotificationLite.instance().error(e))) {
                 bo.onError(e);
@@ -121,29 +121,29 @@ public final class TestSubject<T> extends Subject<T, T> {
      *
      * @param e
      *         the {@code Throwable} to pass to the {@code onError} method
-     * @param timeInMilliseconds
+     * @param delayTime
      *         the number of milliseconds in the future relative to "now()" at which to call {@code onError}
      */
-    public void onError(final Throwable e, long timeInMilliseconds) {
+    public void onError(final Throwable e, long delayTime) {
         innerScheduler.schedule(new Action0() {
 
             @Override
             public void call() {
-                _onError(e);
+                internalOnError(e);
             }
 
-        }, timeInMilliseconds, TimeUnit.MILLISECONDS);
+        }, delayTime, TimeUnit.MILLISECONDS);
     }
 
     /**
-     * Schedule a call to {@code onNext} at relative time of "now()" on TestScheduler.
+     * Schedule a call to {@code onNext} on TestScheduler.
      */
     @Override
     public void onNext(T v) {
-        onNext(v, innerScheduler.now());
+        onNext(v, 0);
     }
 
-    private void _onNext(T v) {
+    void internalOnNext(T v) {
         for (Observer<? super T> o : state.observers()) {
             o.onNext(v);
         }
@@ -154,18 +154,18 @@ public final class TestSubject<T> extends Subject<T, T> {
      *
      * @param v
      *         the item to emit
-     * @param timeInMilliseconds
+     * @param delayTime
      *         the number of milliseconds in the future relative to "now()" at which to call {@code onNext}
      */
-    public void onNext(final T v, long timeInMilliseconds) {
+    public void onNext(final T v, long delayTime) {
         innerScheduler.schedule(new Action0() {
 
             @Override
             public void call() {
-                _onNext(v);
+                internalOnNext(v);
             }
 
-        }, timeInMilliseconds, TimeUnit.MILLISECONDS);
+        }, delayTime, TimeUnit.MILLISECONDS);
     }
 
     @Override

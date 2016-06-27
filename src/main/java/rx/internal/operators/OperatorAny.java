@@ -16,18 +16,20 @@
 package rx.internal.operators;
 
 
-import rx.Observable;
+import rx.*;
 import rx.Observable.Operator;
-import rx.Subscriber;
+import rx.exceptions.Exceptions;
 import rx.functions.Func1;
+import rx.internal.producers.SingleDelayedProducer;
 
 /**
  * Returns an {@link Observable} that emits <code>true</code> if any element of
  * an observable sequence satisfies a condition, otherwise <code>false</code>.
+ * @param <T> the input value type
  */
 public final class OperatorAny<T> implements Operator<Boolean, T> {
-    private final Func1<? super T, Boolean> predicate;
-    private final boolean returnOnEmpty;
+    final Func1<? super T, Boolean> predicate;
+    final boolean returnOnEmpty;
 
     public OperatorAny(Func1<? super T, Boolean> predicate, boolean returnOnEmpty) {
         this.predicate = predicate;
@@ -36,6 +38,7 @@ public final class OperatorAny<T> implements Operator<Boolean, T> {
 
     @Override
     public Subscriber<? super T> call(final Subscriber<? super Boolean> child) {
+        final SingleDelayedProducer<Boolean> producer = new SingleDelayedProducer<Boolean>(child);
         Subscriber<T> s = new Subscriber<T>() {
             boolean hasElements;
             boolean done;
@@ -43,16 +46,20 @@ public final class OperatorAny<T> implements Operator<Boolean, T> {
             @Override
             public void onNext(T t) {
                 hasElements = true;
-                boolean result = predicate.call(t);
+                boolean result;
+                try {
+                    result = predicate.call(t);
+                } catch (Throwable e) {
+                    Exceptions.throwOrReport(e, this, t);
+                    return;
+                }
                 if (result && !done) {
                     done = true;
-                    child.onNext(!returnOnEmpty);
-                    child.onCompleted();
+                    producer.setValue(!returnOnEmpty);
                     unsubscribe();
-                } else {
-                    // if we drop values we must replace them upstream as downstream won't receive and request more
-                    request(1);
-                }
+                } 
+                // note that don't need to request more of upstream because this subscriber 
+                // defaults to requesting Long.MAX_VALUE
             }
 
             @Override
@@ -65,16 +72,16 @@ public final class OperatorAny<T> implements Operator<Boolean, T> {
                 if (!done) {
                     done = true;
                     if (hasElements) {
-                        child.onNext(false);
+                        producer.setValue(false);
                     } else {
-                        child.onNext(returnOnEmpty);
+                        producer.setValue(returnOnEmpty);
                     }
-                    child.onCompleted();
                 }
             }
 
         };
         child.add(s);
+        child.setProducer(producer);
         return s;
     }
 }

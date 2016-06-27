@@ -15,6 +15,8 @@
  */
 package rx.subjects;
 
+import static org.junit.Assert.assertSame;
+
 import java.util.Arrays;
 
 import org.junit.Test;
@@ -32,5 +34,13 @@ public class SerializedSubjectTest {
         subject.onCompleted();
         ts.awaitTerminalEvent();
         ts.assertReceivedOnNext(Arrays.asList("hello"));
+    }
+    
+    @Test
+    public void testDontWrapSerializedSubjectAgain() {
+        PublishSubject<Object> s = PublishSubject.create();
+        Subject<Object, Object> s1 = s.toSerialized();
+        Subject<Object, Object> s2 = s1.toSerialized();
+        assertSame(s1, s2);
     }
 }

@@ -15,11 +15,10 @@
  */
 package rx.internal.operators;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-import static rx.internal.operators.BlockingOperatorNext.next;
+import com.pushtorefresh.private_constructor_checker.PrivateConstructorChecker;
+
+import org.junit.Assert;
+import org.junit.Test;
 
 import java.util.Iterator;
 import java.util.NoSuchElementException;
@@ -28,18 +27,20 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.junit.Assert;
-import org.junit.Test;
-
 import rx.Observable;
 import rx.Subscriber;
 import rx.exceptions.TestException;
-import rx.internal.operators.BlockingOperatorNext;
 import rx.observables.BlockingObservable;
 import rx.schedulers.Schedulers;
 import rx.subjects.BehaviorSubject;
 import rx.subjects.PublishSubject;
 import rx.subjects.Subject;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static rx.internal.operators.BlockingOperatorNext.next;
 
 public class BlockingOperatorNextTest {
 
@@ -72,6 +73,11 @@ public class BlockingOperatorNextTest {
     }
 
     @Test
+    public void constructorShouldBePrivate() {
+        PrivateConstructorChecker.forClass(BlockingOperatorNext.class).expectedTypeOfException(IllegalStateException.class).expectedExceptionMessage("No instances!").check();
+    }
+
+    @Test
     public void testNext() {
         Subject<String, String> obs = PublishSubject.create();
         Iterator<String> it = next(obs).iterator();
@@ -82,6 +88,13 @@ public class BlockingOperatorNextTest {
         fireOnNextInNewThread(obs, "two");
         assertTrue(it.hasNext());
         assertEquals("two", it.next());
+
+        fireOnNextInNewThread(obs, "three");
+        try {
+            assertEquals("three", it.next());
+        } catch (NoSuchElementException e) {
+            fail("Calling next() without hasNext() should wait for next fire");
+        }
 
         obs.onCompleted();
         assertFalse(it.hasNext());
@@ -262,36 +275,40 @@ public class BlockingOperatorNextTest {
 
         });
 
-        Iterator<Integer> it = next(obs).iterator();
-
-        assertTrue(it.hasNext());
-        int a = it.next();
-        assertTrue(it.hasNext());
-        int b = it.next();
-        // we should have a different value
-        assertTrue("a and b should be different", a != b);
-
-        // wait for some time (if times out we are blocked somewhere so fail ... set very high for very slow, constrained machines)
-        timeHasPassed.await(8000, TimeUnit.MILLISECONDS);
-
-        assertTrue(it.hasNext());
-        int c = it.next();
-
-        assertTrue("c should not just be the next in sequence", c != (b + 1));
-        assertTrue("expected that c [" + c + "] is higher than or equal to " + COUNT, c >= COUNT);
-
-        assertTrue(it.hasNext());
-        int d = it.next();
-        assertTrue(d > c);
-
-        // shut down the thread
-        running.set(false);
-
-        finished.await();
-
-        assertFalse(it.hasNext());
-
-        System.out.println("a: " + a + " b: " + b + " c: " + c);
+        try {
+            Iterator<Integer> it = next(obs).iterator();
+    
+            assertTrue(it.hasNext());
+            int a = it.next();
+            assertTrue(it.hasNext());
+            int b = it.next();
+            // we should have a different value
+            assertTrue("a and b should be different", a != b);
+    
+            // wait for some time (if times out we are blocked somewhere so fail ... set very high for very slow, constrained machines)
+            timeHasPassed.await(8000, TimeUnit.MILLISECONDS);
+    
+            assertTrue(it.hasNext());
+            int c = it.next();
+    
+            assertTrue("c should not just be the next in sequence", c != (b + 1));
+            assertTrue("expected that c [" + c + "] is higher than or equal to " + COUNT, c >= COUNT);
+    
+            assertTrue(it.hasNext());
+            int d = it.next();
+            assertTrue(d > c);
+    
+            // shut down the thread
+            running.set(false);
+    
+            finished.await();
+    
+            assertFalse(it.hasNext());
+    
+            System.out.println("a: " + a + " b: " + b + " c: " + c);
+        } finally {
+            running.set(false); // don't let the thread spin indefinitely
+        }
     }
 
     @Test /* (timeout = 8000) */

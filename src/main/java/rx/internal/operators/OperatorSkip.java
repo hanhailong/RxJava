@@ -15,9 +15,7 @@
  */
 package rx.internal.operators;
 
-import rx.Observable;
-import rx.Producer;
-import rx.Subscriber;
+import rx.*;
 
 /**
  * Returns an Observable that skips the first <code>num</code> items emitted by the source
@@ -27,12 +25,16 @@ import rx.Subscriber;
  * <p>
  * You can ignore the first <code>num</code> items emitted by an Observable and attend only to
  * those items that come after, by modifying the Observable with the {@code skip} operator.
+ * @param <T> the value type
  */
 public final class OperatorSkip<T> implements Observable.Operator<T, T> {
 
     final int toSkip;
 
     public OperatorSkip(int n) {
+        if (n < 0) {
+            throw new IllegalArgumentException("n >= 0 required but it was " + n);
+        }
         this.toSkip = n;
     }
 
@@ -40,7 +42,7 @@ public final class OperatorSkip<T> implements Observable.Operator<T, T> {
     public Subscriber<? super T> call(final Subscriber<? super T> child) {
         return new Subscriber<T>(child) {
 
-            int skipped = 0;
+            int skipped;
 
             @Override
             public void onCompleted() {
@@ -63,19 +65,8 @@ public final class OperatorSkip<T> implements Observable.Operator<T, T> {
 
             @Override
             public void setProducer(final Producer producer) {
-                child.setProducer(new Producer() {
-
-                    @Override
-                    public void request(long n) {
-                        if (n == Long.MAX_VALUE) {
-                            // infinite so leave it alone
-                            producer.request(n);
-                        } else if (n > 0) {
-                            // add the skip num to the requested amount, since we'll skip everything and then emit to the buffer downstream
-                            producer.request(n + (toSkip - skipped));
-                        }
-                    }
-                });
+                child.setProducer(producer);
+                producer.request(toSkip);
             }
 
         };

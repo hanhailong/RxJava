@@ -17,26 +17,24 @@ package rx.internal.operators;
 
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Matchers.any;
-import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.*;
 
-import java.util.Arrays;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.*;
 
-import org.junit.Test;
+import org.junit.*;
 import org.mockito.InOrder;
 
 import rx.Observable;
 import rx.Observer;
+import rx.Scheduler.Worker;
 import rx.Subscriber;
-import rx.functions.Func1;
-import rx.internal.util.RxRingBuffer;
-import rx.internal.util.UtilityFunctions;
+import rx.functions.*;
+import rx.internal.util.*;
 import rx.observers.TestSubscriber;
 import rx.schedulers.Schedulers;
+import rx.subjects.PublishSubject;
 
 public class OperatorTakeLastTest {
 
@@ -293,4 +291,104 @@ public class OperatorTakeLastTest {
         });
         assertEquals(1,count.get());
     }
+    
+    @Test(timeout=10000)
+    public void testRequestOverflow() {
+        final List<Integer> list = new ArrayList<Integer>();
+        Observable.range(1, 100).takeLast(50).subscribe(new Subscriber<Integer>() {
+
+            @Override
+            public void onStart() {
+                request(2);
+            }
+            
+            @Override
+            public void onCompleted() {
+                
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                
+            }
+
+            @Override
+            public void onNext(Integer t) {
+                list.add(t);
+                request(Long.MAX_VALUE-1);
+            }});
+        assertEquals(50, list.size());
+    }
+    
+    @Test(timeout = 30000) // original could get into an infinite loop
+    public void completionRequestRace() {
+        Worker w = Schedulers.computation().createWorker();
+        try {
+            final int n = 1000;
+            for (int i = 0; i < 25000; i++) {
+                if (i % 1000 == 0) {
+                    System.out.println("completionRequestRace >> " + i);
+                }
+                PublishSubject<Integer> ps = PublishSubject.create();
+                final TestSubscriber<Integer> ts = new TestSubscriber<Integer>(0);
+                
+                ps.takeLast(n).subscribe(ts);
+                
+                for (int j = 0; j < n; j++) {
+                    ps.onNext(j);
+                }
+
+                final AtomicBoolean go = new AtomicBoolean();
+                
+                w.schedule(new Action0() {
+                    @Override
+                    public void call() {
+                        while (!go.get());
+                        ts.requestMore(n + 1);
+                    }
+                });
+                
+                go.set(true);
+                ps.onCompleted();
+                
+                ts.awaitTerminalEvent(1, TimeUnit.SECONDS);
+                
+                ts.assertValueCount(n);
+                ts.assertNoErrors();
+                ts.assertCompleted();
+                
+                List<Integer> list = ts.getOnNextEvents();
+                for (int j = 0; j < n; j++) {
+                    Assert.assertEquals(j, list.get(j).intValue());
+                }
+            }
+        } finally {
+            w.unsubscribe();
+        }
+    }
+
+    @Test
+    public void nullElements() {
+        TestSubscriber<Integer> ts = new TestSubscriber<Integer>(0);
+        
+        Observable.from(new Integer[] { 1, null, 2}).takeLast(4)
+        .subscribe(ts);
+        
+        ts.assertNoValues();
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+        
+        ts.requestMore(1);
+        
+        ts.assertValue(1);
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+        
+        ts.requestMore(2);
+        
+        ts.assertValues(1, null, 2);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+    }
+
 }

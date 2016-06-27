@@ -16,6 +16,7 @@
 package rx.internal.operators;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyString;
@@ -28,22 +29,20 @@ import static org.mockito.Mockito.verify;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 
 import org.junit.Test;
 import org.mockito.InOrder;
 
-import rx.Observable;
 import rx.Observable.OnSubscribe;
-import rx.Observer;
-import rx.Subscriber;
-import rx.Subscription;
+import rx.*;
+import rx.functions.Func1;
 import rx.internal.util.RxRingBuffer;
 import rx.observers.TestSubscriber;
 import rx.schedulers.Schedulers;
 import rx.schedulers.TestScheduler;
+import rx.subjects.*;
 import rx.subscriptions.BooleanSubscription;
 
 public class OperatorConcatTest {
@@ -82,6 +81,34 @@ public class OperatorConcatTest {
         concat.subscribe(observer);
 
         verify(observer, times(7)).onNext(anyString());
+    }
+    
+    @Test
+    public void testConcatMapIterable() {
+        @SuppressWarnings("unchecked")
+        Observer<String> observer = mock(Observer.class);
+
+        final String[] l = { "a", "b", "c", "d", "e" };
+        
+        Func1<List<String>,List<String>> identity = new Func1<List<String>, List<String>>() {
+			@Override
+			public List<String> call(List<String> t) {
+				return t;
+			}
+		};
+
+        final Observable<List<String>> listObs = Observable.just(Arrays.asList(l));
+        final Observable<String> concatMap = listObs.concatMapIterable(identity);
+        
+        concatMap.subscribe(observer);
+
+        InOrder inOrder = inOrder(observer);
+        inOrder.verify(observer, times(1)).onNext("a");
+        inOrder.verify(observer, times(1)).onNext("b");
+        inOrder.verify(observer, times(1)).onNext("c");
+        inOrder.verify(observer, times(1)).onNext("d");
+        inOrder.verify(observer, times(1)).onNext("e");
+        inOrder.verify(observer, times(1)).onCompleted();
     }
 
     @Test
@@ -145,6 +172,7 @@ public class OperatorConcatTest {
 
     /**
      * Test an async Observable that emits more async Observables
+     * @throws Throwable on any error
      */
     @SuppressWarnings("unchecked")
     @Test
@@ -394,7 +422,7 @@ public class OperatorConcatTest {
             Subscription s1 = concat.subscribe(observer);
             //Block main thread to allow observable "w1" to complete and observable "w2" to call onNext once.
             callOnce.await();
-            // Unsubcribe
+            // Unsubscribe
             s1.unsubscribe();
             //Unblock the observable to continue.
             okToContinue.countDown();
@@ -485,11 +513,11 @@ public class OperatorConcatTest {
         private final T seed;
         private final int size;
 
-        public TestObservable(@SuppressWarnings("unchecked") T... values) {
+        public TestObservable(T... values) {
             this(null, null, values);
         }
 
-        public TestObservable(CountDownLatch once, CountDownLatch okToContinue, @SuppressWarnings("unchecked") T... values) {
+        public TestObservable(CountDownLatch once, CountDownLatch okToContinue, T... values) {
             this.values = Arrays.asList(values);
             this.size = this.values.size();
             this.once = once;
@@ -716,6 +744,171 @@ public class OperatorConcatTest {
         ts.assertTerminalEvent();
         ts.assertNoErrors();
         ts.assertReceivedOnNext(Arrays.asList("hello", "hello"));
+    }
+
+    @Test(timeout = 10000)
+    public void testIssue2890NoStackoverflow() throws InterruptedException {
+        final ExecutorService executor = Executors.newFixedThreadPool(2);
+        final Scheduler sch = Schedulers.from(executor);
+
+        Func1<Integer, Observable<Integer>> func = new Func1<Integer, Observable<Integer>>() {
+            @Override
+            public Observable<Integer> call(Integer t) {
+                Observable<Integer> observable = Observable.just(t)
+                        .subscribeOn(sch)
+                ;
+                Subject<Integer, Integer> subject = UnicastSubject.create();
+                observable.subscribe(subject);
+                return subject;
+            }
+        };
+
+        int n = 5000;
+        final AtomicInteger counter = new AtomicInteger();
+
+        Observable.range(1, n).concatMap(func).subscribe(new Subscriber<Integer>() {
+            @Override
+            public void onNext(Integer t) {
+                // Consume after sleep for 1 ms
+                try {
+                    Thread.sleep(1);
+                } catch (InterruptedException e) {
+                    // ignored
+                }
+                if (counter.getAndIncrement() % 100 == 0) {
+                    System.out.print("testIssue2890NoStackoverflow -> ");
+                    System.out.println(counter.get());
+                }
+            }
+
+            @Override
+            public void onCompleted() {
+                executor.shutdown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                executor.shutdown();
+            }
+        });
+
+        executor.awaitTermination(12000, TimeUnit.MILLISECONDS);
+        
+        assertEquals(n, counter.get());
+    }
+    
+    @Test
+    public void testRequestOverflowDoesNotStallStream() {
+        Observable<Integer> o1 = Observable.just(1,2,3);
+        Observable<Integer> o2 = Observable.just(4,5,6);
+        final AtomicBoolean completed = new AtomicBoolean(false);
+        o1.concatWith(o2).subscribe(new Subscriber<Integer>() {
+
+            @Override
+            public void onCompleted() {
+                completed.set(true);
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                
+            }
+
+            @Override
+            public void onNext(Integer t) {
+                request(2);
+            }});
+        
+        assertTrue(completed.get());
+    }
+    
+    @Test//(timeout = 100000)
+    public void concatMapRangeAsyncLoopIssue2876() {
+        final long durationSeconds = 2;
+        final long startTime = System.currentTimeMillis();
+        for (int i = 0;; i++) {
+            //only run this for a max of ten seconds
+            if (System.currentTimeMillis()-startTime > TimeUnit.SECONDS.toMillis(durationSeconds))
+                return;
+            if (i % 1000 == 0) {
+                System.out.println("concatMapRangeAsyncLoop > " + i);
+            }
+            TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
+            Observable.range(0, 1000)
+            .concatMap(new Func1<Integer, Observable<Integer>>() {
+                @Override
+                public Observable<Integer> call(Integer t) {
+                    return Observable.from(Arrays.asList(t));
+                }
+            })
+            .observeOn(Schedulers.computation()).subscribe(ts);
+
+            ts.awaitTerminalEvent(2500, TimeUnit.MILLISECONDS);
+            ts.assertTerminalEvent();
+            ts.assertNoErrors();
+            assertEquals(1000, ts.getOnNextEvents().size());
+            assertEquals((Integer)999, ts.getOnNextEvents().get(999));
+        }
+    }
+    
+    @Test
+    public void scalarAndRangeBackpressured() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+        
+        Observable.just(1).concatWith(Observable.range(2, 3)).subscribe(ts);
+        
+        ts.assertNoValues();
+        
+        ts.requestMore(5);
+        
+        ts.assertValues(1, 2, 3, 4);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+    }
+    
+    @Test
+    public void scalarAndEmptyBackpressured() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+        
+        Observable.just(1).concatWith(Observable.<Integer>empty()).subscribe(ts);
+        
+        ts.assertNoValues();
+        
+        ts.requestMore(5);
+        
+        ts.assertValue(1);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+    }
+
+    @Test
+    public void rangeAndEmptyBackpressured() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+        
+        Observable.range(1, 2).concatWith(Observable.<Integer>empty()).subscribe(ts);
+        
+        ts.assertNoValues();
+        
+        ts.requestMore(5);
+        
+        ts.assertValues(1, 2);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+    }
+
+    @Test
+    public void emptyAndScalarBackpressured() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+        
+        Observable.<Integer>empty().concatWith(Observable.just(1)).subscribe(ts);
+        
+        ts.assertNoValues();
+        
+        ts.requestMore(5);
+        
+        ts.assertValue(1);
+        ts.assertCompleted();
+        ts.assertNoErrors();
     }
 
 }

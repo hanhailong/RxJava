@@ -15,12 +15,12 @@
  */
 package rx.internal.operators;
 
+import java.util.*;
+
 import rx.Observable.Operator;
 import rx.Subscriber;
-
-import java.util.ArrayList;
-import java.util.LinkedList;
-import java.util.List;
+import rx.exceptions.Exceptions;
+import rx.internal.producers.SingleDelayedProducer;
 
 /**
  * Returns an {@code Observable} that emits a single item, a list composed of all the items emitted by the
@@ -35,27 +35,33 @@ import java.util.List;
  * <p>
  * Be careful not to use this operator on {@code Observable}s that emit infinite or very large numbers of items,
  * as you do not have the option to unsubscribe.
+ * @param <T> the value type of the input and the output list's items
  */
 public final class OperatorToObservableList<T> implements Operator<List<T>, T> {
     /** Lazy initialization via inner-class holder. */
-    private static final class Holder {
+    static final class Holder {
         /** A singleton instance. */
         static final OperatorToObservableList<Object> INSTANCE = new OperatorToObservableList<Object>();
     }
     /**
+     * @param <T> the value type of the input and the output list's items
      * @return a singleton instance of this stateless operator.
      */
     @SuppressWarnings({ "unchecked" })
     public static <T> OperatorToObservableList<T> instance() {
         return (OperatorToObservableList<T>)Holder.INSTANCE;
     }
-    private OperatorToObservableList() { }
+    OperatorToObservableList() { 
+        // singleton
+    }
+    
     @Override
     public Subscriber<? super T> call(final Subscriber<? super List<T>> o) {
-        return new Subscriber<T>(o) {
+        final SingleDelayedProducer<List<T>> producer = new SingleDelayedProducer<List<T>>(o);
+        Subscriber<T> result =  new Subscriber<T>() {
 
-            private boolean completed = false;
-            final List<T> list = new LinkedList<T>();
+            boolean completed;
+            List<T> list = new LinkedList<T>();
 
             @Override
             public void onStart() {
@@ -64,27 +70,32 @@ public final class OperatorToObservableList<T> implements Operator<List<T>, T> {
 
             @Override
             public void onCompleted() {
-                try {
+                if (!completed) {
                     completed = true;
-                    /*
-                     * Ideally this should just return Collections.unmodifiableList(list) and not copy it, 
-                     * but, it ends up being a breaking change if we make that modification. 
-                     * 
-                     * Here is an example of is being done with these lists that breaks if we make it immutable:
-                     * 
-                     * Caused by: java.lang.UnsupportedOperationException
-                     *     at java.util.Collections$UnmodifiableList$1.set(Collections.java:1244)
-                     *     at java.util.Collections.sort(Collections.java:221)
-                     *     ...
-                     * Caused by: rx.exceptions.OnErrorThrowable$OnNextValue: OnError while emitting onNext value: UnmodifiableList.class
-                     *     at rx.exceptions.OnErrorThrowable.addValueAsLastCause(OnErrorThrowable.java:98)
-                     *     at rx.internal.operators.OperatorMap$1.onNext(OperatorMap.java:56)
-                     *     ... 419 more
-                     */
-                    o.onNext(new ArrayList<T>(list));
-                    o.onCompleted();
-                } catch (Throwable e) {
-                    onError(e);
+                    List<T> result;
+                    try {
+                        /*
+                         * Ideally this should just return Collections.unmodifiableList(list) and not copy it, 
+                         * but, it ends up being a breaking change if we make that modification. 
+                         * 
+                         * Here is an example of is being done with these lists that breaks if we make it immutable:
+                         * 
+                         * Caused by: java.lang.UnsupportedOperationException
+                         *     at java.util.Collections$UnmodifiableList$1.set(Collections.java:1244)
+                         *     at java.util.Collections.sort(Collections.java:221)
+                         *     ...
+                         * Caused by: rx.exceptions.OnErrorThrowable$OnNextValue: OnError while emitting onNext value: UnmodifiableList.class
+                         *     at rx.exceptions.OnErrorThrowable.addValueAsLastCause(OnErrorThrowable.java:98)
+                         *     at rx.internal.operators.OperatorMap$1.onNext(OperatorMap.java:56)
+                         *     ... 419 more
+                         */
+                        result = new ArrayList<T>(list);
+                    } catch (Throwable t) {
+                        Exceptions.throwOrReport(t, this);
+                        return;
+                    }
+                    list = null;
+                    producer.setValue(result);
                 }
             }
 
@@ -101,6 +112,9 @@ public final class OperatorToObservableList<T> implements Operator<List<T>, T> {
             }
 
         };
+        o.add(result);
+        o.setProducer(producer);
+        return result;
     }
 
 }

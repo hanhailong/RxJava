@@ -21,14 +21,14 @@ import static org.mockito.Mockito.*;
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.*;
 
 import org.junit.*;
 import org.mockito.*;
 
 import rx.*;
-import rx.Observable.OnSubscribe;
 import rx.Observable;
+import rx.Observable.OnSubscribe;
 import rx.Observer;
 import rx.functions.*;
 import rx.observers.*;
@@ -47,7 +47,7 @@ public class OnSubscribeRefCountTest {
     public void testRefCountAsync() {
         final AtomicInteger subscribeCount = new AtomicInteger();
         final AtomicInteger nextCount = new AtomicInteger();
-        Observable<Long> r = Observable.timer(0, 5, TimeUnit.MILLISECONDS)
+        Observable<Long> r = Observable.interval(0, 5, TimeUnit.MILLISECONDS)
                 .doOnSubscribe(new Action0() {
 
                     @Override
@@ -183,7 +183,7 @@ public class OnSubscribeRefCountTest {
     public void testRepeat() {
         final AtomicInteger subscribeCount = new AtomicInteger();
         final AtomicInteger unsubscribeCount = new AtomicInteger();
-        Observable<Long> r = Observable.timer(0, 1, TimeUnit.MILLISECONDS)
+        Observable<Long> r = Observable.interval(0, 1, TimeUnit.MILLISECONDS)
                 .doOnSubscribe(new Action0() {
 
                     @Override
@@ -528,6 +528,10 @@ public class OnSubscribeRefCountTest {
 
     @Test(timeout = 10000)
     public void testUpstreamErrorAllowsRetry() throws InterruptedException {
+        
+        final AtomicReference<Throwable> err1 = new AtomicReference<Throwable>();
+        final AtomicReference<Throwable> err2 = new AtomicReference<Throwable>();
+        
         final AtomicInteger intervalSubscribed = new AtomicInteger();
         Observable<String> interval =
                 Observable.interval(200,TimeUnit.MILLISECONDS)
@@ -572,6 +576,11 @@ public class OnSubscribeRefCountTest {
                     public void call(String t1) {
                         System.out.println("Subscriber 1: " + t1);
                     }
+                }, new Action1<Throwable>() {
+                    @Override
+                    public void call(Throwable t) {
+                        err1.set(t);
+                    }
                 });
         Thread.sleep(100);
         interval
@@ -587,11 +596,19 @@ public class OnSubscribeRefCountTest {
                     public void call(String t1) {
                         System.out.println("Subscriber 2: " + t1);
                     }
+                }, new Action1<Throwable>() {
+                    @Override
+                    public void call(Throwable t) {
+                        err2.set(t);
+                    }
                 });
         
         Thread.sleep(1300);
         
         System.out.println(intervalSubscribed.get());
         assertEquals(6, intervalSubscribed.get());
+        
+        assertNotNull("First subscriber didn't get the error", err1);
+        assertNotNull("Second subscriber didn't get the error", err2);
     }
 }

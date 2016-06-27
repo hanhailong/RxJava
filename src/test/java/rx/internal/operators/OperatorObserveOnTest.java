@@ -15,45 +15,26 @@
  */
 package rx.internal.operators;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
+import static org.junit.Assert.*;
+import static org.mockito.Matchers.*;
+import static org.mockito.Mockito.*;
 
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 
 import org.junit.Test;
 import org.mockito.InOrder;
 
-import rx.Notification;
+import rx.*;
 import rx.Observable;
 import rx.Observable.OnSubscribe;
 import rx.Observer;
-import rx.Scheduler;
-import rx.Subscriber;
-import rx.Subscription;
-import rx.exceptions.MissingBackpressureException;
-import rx.exceptions.TestException;
-import rx.functions.Action0;
-import rx.functions.Action1;
-import rx.functions.Func1;
-import rx.functions.Func2;
+import rx.exceptions.*;
+import rx.functions.*;
 import rx.internal.util.RxRingBuffer;
 import rx.observers.TestSubscriber;
-import rx.schedulers.Schedulers;
-import rx.schedulers.TestScheduler;
+import rx.schedulers.*;
 import rx.subjects.PublishSubject;
 
 public class OperatorObserveOnTest {
@@ -136,7 +117,7 @@ public class OperatorObserveOnTest {
                 assertTrue(correctThreadName);
             }
 
-        }).finallyDo(new Action0() {
+        }).doAfterTerminate(new Action0() {
 
             @Override
             public void call() {
@@ -257,7 +238,7 @@ public class OperatorObserveOnTest {
      * Confirm that running on a ThreadPoolScheduler allows multiple threads but is still ordered.
      */
     @Test
-    public void testObserveOnWithThreadPoolScheduler() {
+    public void testObserveOnWithComputationScheduler() {
         final AtomicInteger count = new AtomicInteger();
         final int _multiple = 99;
 
@@ -274,7 +255,7 @@ public class OperatorObserveOnTest {
                     @Override
                     public void call(Integer t1) {
                         assertEquals(count.incrementAndGet() * _multiple, t1.intValue());
-                        assertTrue(Thread.currentThread().getName().startsWith("RxComputationThreadPool"));
+                        assertTrue(Thread.currentThread().getName().startsWith("RxComputationScheduler"));
                     }
 
                 });
@@ -314,7 +295,7 @@ public class OperatorObserveOnTest {
                     @Override
                     public void call(Integer t1) {
                         assertEquals(count.incrementAndGet() * _multiple, t1.intValue());
-                        assertTrue(Thread.currentThread().getName().startsWith("RxComputationThreadPool"));
+                        assertTrue(Thread.currentThread().getName().startsWith("RxComputationScheduler"));
                     }
 
                 });
@@ -600,6 +581,33 @@ public class OperatorObserveOnTest {
     }
 
     @Test
+    public void testQueueFullEmitsErrorWithVaryingBufferSize() {
+        for (int i = 1; i <= 1024; i = i * 2) {
+            final int capacity = i;
+            System.out.println(">> testQueueFullEmitsErrorWithVaryingBufferSize @ " + i);
+            
+            PublishSubject<Integer> ps = PublishSubject.create();
+            
+            TestSubscriber<Integer> ts = new TestSubscriber<Integer>(0);
+            
+            TestScheduler test = Schedulers.test();
+            
+            ps.observeOn(test, capacity).subscribe(ts);
+            
+            for (int j = 0; j < capacity + 10; j++) {
+                ps.onNext(j);
+            }
+            ps.onCompleted();
+            
+            test.advanceTimeBy(1, TimeUnit.SECONDS);
+            
+            ts.assertNoValues();
+            ts.assertError(MissingBackpressureException.class);
+            ts.assertNotCompleted();
+        }
+    }
+
+    @Test
     public void testAsyncChild() {
         TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
         Observable.range(0, 100000).observeOn(Schedulers.newThread()).observeOn(Schedulers.newThread()).subscribe(ts);
@@ -661,7 +669,7 @@ public class OperatorObserveOnTest {
     @Test
     public void testHotOperatorBackpressure() {
         TestSubscriber<String> ts = new TestSubscriber<String>();
-        Observable.timer(0, 1, TimeUnit.MICROSECONDS)
+        Observable.interval(0, 1, TimeUnit.MICROSECONDS)
                 .observeOn(Schedulers.computation())
                 .map(new Func1<Long, String>() {
 
@@ -685,7 +693,7 @@ public class OperatorObserveOnTest {
 
     @Test
     public void testErrorPropagatesWhenNoOutstandingRequests() {
-        Observable<Long> timer = Observable.timer(0, 1, TimeUnit.MICROSECONDS)
+        Observable<Long> timer = Observable.interval(0, 1, TimeUnit.MICROSECONDS)
                 .doOnEach(new Action1<Notification<? super Long>>() {
 
                     @Override
@@ -724,4 +732,238 @@ public class OperatorObserveOnTest {
         assertEquals(MissingBackpressureException.class, ts.getOnErrorEvents().get(0).getClass());
     }
 
+    @Test
+    public void testRequestOverflow() throws InterruptedException {
+
+        final CountDownLatch latch = new CountDownLatch(1);
+        final AtomicInteger count = new AtomicInteger();
+        Observable.range(1, 100).observeOn(Schedulers.computation())
+                .subscribe(new Subscriber<Integer>() {
+
+                    boolean first = true;
+                    
+                    @Override
+                    public void onStart() {
+                        request(2);
+                    }
+
+                    @Override
+                    public void onCompleted() {
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public void onError(Throwable e) {
+
+                    }
+
+                    @Override
+                    public void onNext(Integer t) {
+                        count.incrementAndGet();
+                        if (first) {
+                            request(Long.MAX_VALUE - 1);
+                            request(Long.MAX_VALUE - 1);
+                            request(10);
+                            first = false;
+                        }
+                    }
+                });
+        assertTrue(latch.await(10, TimeUnit.SECONDS));
+        assertEquals(100, count.get());
+
+    }
+    
+    @Test
+    public void testNoMoreRequestsAfterUnsubscribe() throws InterruptedException {
+        final CountDownLatch latch = new CountDownLatch(1);
+        final List<Long> requests = Collections.synchronizedList(new ArrayList<Long>());
+        Observable.range(1, 1000000)
+                .doOnRequest(new Action1<Long>() {
+
+                    @Override
+                    public void call(Long n) {
+                        requests.add(n);
+                    }
+                })
+                .observeOn(Schedulers.io())
+                .subscribe(new Subscriber<Integer>() {
+
+                    @Override
+                    public void onStart() {
+                        request(1);
+                    }
+
+                    @Override
+                    public void onCompleted() {
+                    }
+
+                    @Override
+                    public void onError(Throwable e) {
+                    }
+
+                    @Override
+                    public void onNext(Integer t) {
+                        unsubscribe();
+                        latch.countDown();
+                    }
+                });
+        assertTrue(latch.await(10, TimeUnit.SECONDS));
+        assertEquals(1, requests.size());
+    }
+
+    @Test
+    public void testErrorDelayed() {
+        TestScheduler s = Schedulers.test();
+        
+        Observable<Integer> source = Observable.just(1, 2 ,3)
+                .concatWith(Observable.<Integer>error(new TestException()));
+        
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+
+        source.observeOn(s, true).subscribe(ts);
+        
+        ts.assertNoValues();
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+        
+        s.advanceTimeBy(1, TimeUnit.SECONDS);
+
+        ts.assertNoValues();
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+
+        ts.requestMore(1);
+        s.advanceTimeBy(1, TimeUnit.SECONDS);
+        
+        ts.assertValues(1);
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+        
+        ts.requestMore(3); // requesting 2 doesn't switch to the error() source for some reason in concat.
+        s.advanceTimeBy(1, TimeUnit.SECONDS);
+        
+        ts.assertValues(1, 2, 3);
+        ts.assertError(TestException.class);
+        ts.assertNotCompleted();
+    }
+    
+    @Test
+    public void testErrorDelayedAsync() {
+        Observable<Integer> source = Observable.just(1, 2 ,3)
+                .concatWith(Observable.<Integer>error(new TestException()));
+        
+        TestSubscriber<Integer> ts = TestSubscriber.create();
+
+        source.observeOn(Schedulers.computation(), true).subscribe(ts);
+        
+        ts.awaitTerminalEvent(2, TimeUnit.SECONDS);
+        ts.assertValues(1, 2, 3);
+        ts.assertError(TestException.class);
+        ts.assertNotCompleted();
+    }
+    
+    @Test
+    public void requestExactCompletesImmediately() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+        
+        TestScheduler test = Schedulers.test();
+
+        Observable.range(1, 10).observeOn(test).subscribe(ts);
+
+        test.advanceTimeBy(1, TimeUnit.SECONDS);
+
+        ts.assertNoValues();
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+        
+        ts.requestMore(10);
+
+        test.advanceTimeBy(1, TimeUnit.SECONDS);
+        
+        ts.assertValueCount(10);
+        ts.assertNoErrors();
+        ts.assertCompleted();
+    }
+    
+    @Test
+    public void fixedReplenishPattern() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+
+        TestScheduler test = Schedulers.test();
+        
+        final List<Long> requests = new ArrayList<Long>();
+        
+        Observable.range(1, 100)
+        .doOnRequest(new Action1<Long>() {
+            @Override
+            public void call(Long v) {
+                requests.add(v);
+            }
+        })
+        .observeOn(test, 16).subscribe(ts);
+        
+        test.advanceTimeBy(1, TimeUnit.SECONDS);
+        ts.requestMore(20);
+        test.advanceTimeBy(1, TimeUnit.SECONDS);
+        ts.requestMore(10);
+        test.advanceTimeBy(1, TimeUnit.SECONDS);
+        ts.requestMore(50);
+        test.advanceTimeBy(1, TimeUnit.SECONDS);
+        ts.requestMore(35);
+        test.advanceTimeBy(1, TimeUnit.SECONDS);
+        
+        ts.assertValueCount(100);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+        
+        assertEquals(Arrays.asList(16L, 12L, 12L, 12L, 12L, 12L, 12L, 12L, 12L), requests);
+    }
+    
+    @Test
+    public void bufferSizesWork() {
+        for (int i = 1; i <= 1024; i = i * 2) {
+            TestSubscriber<Integer> ts = TestSubscriber.create();
+            
+            Observable.range(1, 1000 * 1000).observeOn(Schedulers.computation(), i)
+            .subscribe(ts);
+            
+            ts.awaitTerminalEvent();
+            ts.assertValueCount(1000 * 1000);
+            ts.assertCompleted();
+            ts.assertNoErrors();
+        }
+    }
+    
+    @Test
+    public void synchronousRebatching() {
+        final List<Long> requests = new ArrayList<Long>();
+        
+        TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
+            
+        Observable.range(1, 50)
+        .doOnRequest(new Action1<Long>() {
+            @Override
+            public void call(Long r) {
+                requests.add(r);
+            }
+        })
+       .rebatchRequests(20)
+       .subscribe(ts);
+       
+       ts.assertValueCount(50);
+       ts.assertNoErrors();
+       ts.assertCompleted();
+       
+       assertEquals(Arrays.asList(20L, 15L, 15L, 15L), requests);
+    }
+    
+    @Test
+    public void rebatchRequestsArgumentCheck() {
+        try {
+            Observable.never().rebatchRequests(-99);
+            fail("Didn't throw IAE");
+        } catch (IllegalArgumentException ex) {
+            assertEquals("n > 0 required but it was -99", ex.getMessage());
+        }
+    }
 }

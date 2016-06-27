@@ -15,20 +15,22 @@
  */
 package rx.internal.operators;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
+import static org.mockito.Matchers.any;
+import static org.mockito.Mockito.*;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.junit.Test;
+import org.junit.*;
 
+import rx.*;
+import rx.Observable.OnSubscribe;
 import rx.Observable;
-import rx.functions.Action1;
-import rx.functions.Func1;
+import rx.Observer;
+import rx.functions.*;
+import rx.internal.util.UtilityFunctions;
 import rx.observers.TestSubscriber;
 import rx.schedulers.Schedulers;
 
@@ -198,5 +200,196 @@ public class OperatorWindowWithSizeTest {
         }
         return list;
     }
+    
+    @Test
+    public void testBackpressureOuter() {
+        Observable<Observable<Integer>> source = Observable.range(1, 10).window(3);
+        
+        final List<Integer> list = new ArrayList<Integer>();
+        
+        @SuppressWarnings("unchecked")
+        final Observer<Integer> o = mock(Observer.class);
+        
+        source.subscribe(new Subscriber<Observable<Integer>>() {
+            @Override
+            public void onStart() {
+                request(1);
+            }
+            @Override
+            public void onNext(Observable<Integer> t) {
+                t.subscribe(new Observer<Integer>() {
+                    @Override
+                    public void onNext(Integer t) {
+                        list.add(t);
+                    }
+                    @Override
+                    public void onError(Throwable e) {
+                        o.onError(e);
+                    }
+                    @Override
+                    public void onCompleted() {
+                        o.onCompleted();
+                    }
+                });
+            }
+            @Override
+            public void onError(Throwable e) {
+                o.onError(e);
+            }
+            @Override
+            public void onCompleted() {
+                o.onCompleted();
+            }
+        });
+        
+        assertEquals(Arrays.asList(1, 2, 3), list);
+        
+        verify(o, never()).onError(any(Throwable.class));
+        verify(o, times(1)).onCompleted(); // 1 inner
+    }
 
+    public static Observable<Integer> hotStream() {
+        return Observable.create(new OnSubscribe<Integer>() {
+            @Override
+            public void call(Subscriber<? super Integer> s) {
+                while (!s.isUnsubscribed()) {
+                    // burst some number of items
+                    for (int i = 0; i < Math.random() * 20; i++) {
+                        s.onNext(i);
+                    }
+                    try {
+                        // sleep for a random amount of time
+                        // NOTE: Only using Thread.sleep here as an artificial demo.
+                        Thread.sleep((long) (Math.random() * 200));
+                    } catch (Exception e) {
+                        // do nothing
+                    }
+                }
+                System.out.println("Hot done.");
+            }
+        }).subscribeOn(Schedulers.newThread()); // use newThread since we are using sleep to block
+    }
+    
+    @Test
+    public void testTakeFlatMapCompletes() {
+        TestSubscriber<Integer> ts = new TestSubscriber<Integer>();
+        
+        final int indicator = 999999999;
+        
+        hotStream()
+        .window(10)
+        .take(2)
+        .flatMap(new Func1<Observable<Integer>, Observable<Integer>>() {
+            @Override
+            public Observable<Integer> call(Observable<Integer> w) {
+                return w.startWith(indicator);
+            }
+        }).subscribe(ts);
+        
+        ts.awaitTerminalEvent(2, TimeUnit.SECONDS);
+        ts.assertCompleted();
+        Assert.assertFalse(ts.getOnNextEvents().isEmpty());
+    }
+    
+    @Ignore("Requires #3678")
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testBackpressureOuterInexact() {
+        TestSubscriber<List<Integer>> ts = new TestSubscriber<List<Integer>>(0);
+        
+        Observable.range(1, 5).window(2, 1)
+        .map(new Func1<Observable<Integer>, Observable<List<Integer>>>() {
+            @Override
+            public Observable<List<Integer>> call(Observable<Integer> t) {
+                return t.toList();
+            }
+        }).concatMap(UtilityFunctions.<Observable<List<Integer>>>identity())
+        .subscribe(ts);
+        
+        ts.assertNoErrors();
+        ts.assertNoValues();
+        ts.assertNotCompleted();
+        
+        ts.requestMore(2);
+
+        ts.assertValues(Arrays.asList(1, 2), Arrays.asList(2, 3));
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+
+        ts.requestMore(5);
+
+        System.out.println(ts.getOnNextEvents());
+        
+        ts.assertValues(Arrays.asList(1, 2), Arrays.asList(2, 3),
+                Arrays.asList(3, 4), Arrays.asList(4, 5), Arrays.asList(5));
+        ts.assertNoErrors();
+        ts.assertCompleted();
+    }
+    
+    @Test
+    public void testBackpressureOuterOverlap() {
+        Observable<Observable<Integer>> source = Observable.range(1, 10).window(3, 1);
+        
+        TestSubscriber<Observable<Integer>> ts = TestSubscriber.create(0L);
+        
+        source.subscribe(ts);
+        
+        ts.assertNoValues();
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+        
+        ts.requestMore(1);
+        
+        ts.assertValueCount(1);
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+
+        ts.requestMore(7);
+        
+        ts.assertValueCount(8);
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+        
+        ts.requestMore(3);
+
+        ts.assertValueCount(10);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+    }
+    
+    @Test(expected = IllegalArgumentException.class)
+    public void testCountInvalid() {
+        Observable.range(1, 10).window(0, 1);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testSkipInvalid() {
+        Observable.range(1, 10).window(3, 0);
+    }
+    @Test
+    public void testTake1Overlapping() {
+        Observable<Observable<Integer>> source = Observable.range(1, 10).window(3, 1).take(1);
+        
+        TestSubscriber<Observable<Integer>> ts = TestSubscriber.create(0L);
+
+        source.subscribe(ts);
+        
+        ts.assertNoValues();
+        ts.assertNoErrors();
+        ts.assertNotCompleted();
+        
+        ts.requestMore(2);
+        
+        ts.assertValueCount(1);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+
+        TestSubscriber<Integer> ts1 = TestSubscriber.create();
+        
+        ts.getOnNextEvents().get(0).subscribe(ts1);
+        
+        ts1.assertValues(1, 2, 3);
+        ts1.assertCompleted();
+        ts1.assertNoErrors();
+    }
 }
